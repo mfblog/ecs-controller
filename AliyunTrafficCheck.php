@@ -310,7 +310,9 @@ class AliyunTrafficCheck
                 'usageRemaining' => (float) ($row['maxTraffic'] ?? 0),
                 'usagePercent' => 0,
                 'instanceCount' => 0,
-                'lastUpdated' => 0
+                'lastUpdated' => 0,
+                'trafficStatus' => 'ok',
+                'trafficMessage' => ''
             ];
             $config['Accounts'][] = [
                 'AccessKeyId' => $row['AccessKeyId'],
@@ -326,6 +328,8 @@ class AliyunTrafficCheck
                 'usagePercent' => round((float) ($metrics['usagePercent'] ?? 0), 2),
                 'instanceCount' => (int) ($metrics['instanceCount'] ?? 0),
                 'usageLastUpdated' => !empty($metrics['lastUpdated']) ? date('Y-m-d H:i:s', (int) $metrics['lastUpdated']) : '',
+                'trafficStatus' => $metrics['trafficStatus'] ?? 'ok',
+                'trafficMessage' => $metrics['trafficMessage'] ?? '',
                 'billing' => $billingMetrics[$row['groupKey']] ?? [
                     'enabled' => ($settings['enable_billing'] ?? '0') === '1',
                     'monthly_cost' => null,
@@ -490,7 +494,7 @@ class AliyunTrafficCheck
             $newUpdateTime = $currentTime;
 
             if ($shouldCheckApi) {
-                $newTraffic = $this->safeGetTraffic($account);
+                $trafficResult = $this->safeGetTraffic($account);
                 $status = $this->safeGetInstanceStatus($account);
 
                 if ($status === 'Unknown') {
@@ -498,12 +502,17 @@ class AliyunTrafficCheck
                     $status = $this->safeGetInstanceStatus($account);
                 }
 
-                if ($newTraffic < 0) {
+                $metadata = [
+                    'traffic_api_status' => $trafficResult['status'] ?? 'ok',
+                    'traffic_api_message' => $trafficResult['message'] ?? ''
+                ];
+
+                if (empty($trafficResult['success'])) {
                     $traffic = $account['traffic_used'];
                     $apiStatusLog = "流量接口异常";
                     $newUpdateTime = $lastUpdate;
                 } else {
-                    $traffic = $newTraffic;
+                    $traffic = (float) ($trafficResult['value'] ?? 0);
                     $apiStatusLog = "已更新";
 
                     $this->db->addHourlyStat($account['id'], $traffic);
@@ -518,7 +527,7 @@ class AliyunTrafficCheck
                 }
 
                 $this->notifyStatusChangeIfNeeded($account, $cachedStatus, $status, '系统同步检测到实例状态变化。');
-                $this->configManager->updateAccountStatus($account['id'], $traffic, $status, $newUpdateTime);
+                $this->configManager->updateAccountStatus($account['id'], $traffic, $status, $newUpdateTime, $metadata);
             } else {
                 $traffic = $account['traffic_used'];
                 $status = $account['instance_status'];
@@ -668,18 +677,23 @@ class AliyunTrafficCheck
             return false;
 
         $currentTime = time();
-        $traffic = $this->safeGetTraffic($targetAccount);
+        $trafficResult = $this->safeGetTraffic($targetAccount);
         $status = $this->safeGetInstanceStatus($targetAccount);
+        $metadata = [
+            'traffic_api_status' => $trafficResult['status'] ?? 'ok',
+            'traffic_api_message' => $trafficResult['message'] ?? ''
+        ];
 
-        if ($traffic < 0) {
+        if (empty($trafficResult['success'])) {
             $traffic = $targetAccount['traffic_used'];
         } else {
+            $traffic = (float) ($trafficResult['value'] ?? 0);
             $this->db->addHourlyStat($targetAccount['id'], $traffic);
             $this->db->addDailyStat($targetAccount['id'], $traffic);
         }
 
         $this->notifyStatusChangeIfNeeded($targetAccount, $targetAccount['instance_status'] ?? 'Unknown', $status, '手动同步检测到实例状态变化。');
-        $this->configManager->updateAccountStatus($id, $traffic, $status, $currentTime);
+        $this->configManager->updateAccountStatus($id, $traffic, $status, $currentTime, $metadata);
 
         // 刷新账单数据：仅在启用费用监控 且 无有效缓存时调用 费用中心 接口
         $billingError = null;
@@ -722,12 +736,18 @@ class AliyunTrafficCheck
             }
         }
 
+        $response = [
+            'success' => true,
+            'traffic_status' => $trafficResult['status'] ?? 'ok',
+            'traffic_message' => $trafficResult['message'] ?? ''
+        ];
+
         if ($billingError) {
             $this->db->addLog('warning', "账单刷新异常 [{$this->getAccountLogLabel($targetAccount)}]: {$billingError}");
-            return ['success' => true, 'billing_error' => $billingError];
+            $response['billing_error'] = $billingError;
         }
 
-        return true;
+        return $response;
     }
 
     public function fetchInstances($accessKeyId, $accessKeySecret, $regionId = '')
@@ -827,6 +847,8 @@ class AliyunTrafficCheck
                 'success' => true,
                 'message' => $message,
                 'monitorWarning' => $monitorWarning,
+                'monitorStatus' => $monitorWarning !== '' ? 'warning' : ($monitorChecked ? 'ok' : 'skipped'),
+                'monitorMessage' => $monitorWarning !== '' ? $monitorWarning : ($monitorChecked ? '云监控接口已接通，可获取实例流量。' : '当前区域暂无实例，未执行云监控流量探测'),
                 'usageUsed' => $trafficUsed,
                 'usageRemaining' => $trafficRemaining,
                 'usagePercent' => $trafficPercent,
@@ -1029,14 +1051,58 @@ class AliyunTrafficCheck
         }
 
         $this->configManager->load();
+        $syncedAccounts = array_values(array_filter($this->configManager->getAccounts(), function ($account) use ($groupKey) {
+            $accountGroupKey = $account['group_key'] ?: substr(sha1($account['access_key_id'] . '|' . $account['region_id']), 0, 16);
+            return $accountGroupKey === $groupKey && !empty($account['instance_id']);
+        }));
         $this->reconcileDdnsAfterAccountSync($accountsBeforeSync, $this->configManager->getAccounts(), '账号同步');
         $this->db->addLog('info', "账号同步完成 [{$targetGroup['remark']}] {$targetGroup['regionId']} 实例 {$instanceCount} 台");
 
+        $trafficIssue = $this->summarizeTrafficIssueForAccounts($syncedAccounts);
+        $message = "已同步 {$instanceCount} 台实例，流量和消费情况已刷新";
+        if ($trafficIssue !== '') {
+            $message .= '；' . $trafficIssue;
+        }
+
         return [
             'success' => true,
-            'message' => "已同步 {$instanceCount} 台实例，流量和消费情况已刷新",
-            'instanceCount' => $instanceCount
+            'message' => $message,
+            'instanceCount' => $instanceCount,
+            'trafficIssue' => $trafficIssue
         ];
+    }
+
+    private function summarizeTrafficIssueForAccounts(array $accounts)
+    {
+        if (empty($accounts)) {
+            return '';
+        }
+
+        $statuses = [];
+        foreach ($accounts as $account) {
+            $status = trim((string) ($account['traffic_api_status'] ?? 'ok'));
+            if ($status !== '' && $status !== 'ok') {
+                $statuses[$status] = true;
+            }
+        }
+
+        if (empty($statuses)) {
+            return '';
+        }
+
+        if (isset($statuses['permission_denied'])) {
+            return '部分实例缺少云监控权限，请补充 AliyunCloudMonitorMetricDataReadOnlyAccess';
+        }
+
+        if (isset($statuses['auth_error'])) {
+            return '部分实例云监控鉴权失败，请检查 AK 权限配置';
+        }
+
+        if (isset($statuses['timeout'])) {
+            return '部分实例云监控请求超时，请稍后重试';
+        }
+
+        return '部分实例流量同步失败，请稍后重试';
     }
 
     public function getEcsCreateTask($taskId)
@@ -1193,21 +1259,33 @@ class AliyunTrafficCheck
     private function safeGetTraffic($account)
     {
         try {
-            return $this->getMeteredOutboundTraffic($account);
+            return [
+                'success' => true,
+                'value' => $this->getMeteredOutboundTraffic($account),
+                'status' => 'ok',
+                'message' => ''
+            ];
         } catch (ClientException $e) {
-            $code = $e->getErrorCode();
+            $code = trim((string) $e->getErrorCode());
+            $message = '缺少云监控权限';
+            $status = 'permission_denied';
+            if ($code !== '' && !in_array($code, ['403', 'NoPermission'], true)) {
+                $message = '云监控鉴权失败';
+                $status = 'auth_error';
+            }
             $this->db->addLog('error', "公网出口流量查询配置错误 [{$this->getAccountLogLabel($account)}]: " . ($code ?: "鉴权失败") . "，请确认AK拥有云监控流量查询权限");
-            return -1;
+            return ['success' => false, 'value' => null, 'status' => $status, 'message' => $message];
         } catch (ServerException $e) {
             $this->db->addLog('error', "公网出口流量查询失败 [{$this->getAccountLogLabel($account)}]: " . $e->getErrorCode() . " - " . $e->getErrorMessage());
-            return -1;
+            return ['success' => false, 'value' => null, 'status' => 'sync_error', 'message' => '云监控接口异常'];
         } catch (\Exception $e) {
             if (strpos($e->getMessage(), 'cURL error') !== false) {
                 $this->db->addLog('error', "公网出口流量查询失败 [{$this->getAccountLogLabel($account)}]: 网络连接超时");
-            } else {
-                $this->db->addLog('error', "公网出口流量查询失败 [{$this->getAccountLogLabel($account)}]: " . strip_tags($e->getMessage()));
+                return ['success' => false, 'value' => null, 'status' => 'timeout', 'message' => '云监控请求超时'];
             }
-            return -1;
+
+            $this->db->addLog('error', "公网出口流量查询失败 [{$this->getAccountLogLabel($account)}]: " . strip_tags($e->getMessage()));
+            return ['success' => false, 'value' => null, 'status' => 'sync_error', 'message' => '流量同步失败'];
         }
     }
 
@@ -1855,23 +1933,32 @@ class AliyunTrafficCheck
         $lastUpdate = (int) ($account['updated_at'] ?? 0);
         $cachedStatus = $account['instance_status'] ?? 'Unknown';
         $newUpdateTime = $currentTime;
+        $trafficApiStatus = $account['traffic_api_status'] ?? 'ok';
+        $trafficApiMessage = $account['traffic_api_message'] ?? '';
 
         $isTransientState = in_array($cachedStatus, ['Starting', 'Stopping', 'Pending', 'Unknown'], true);
         $checkInterval = $isTransientState ? 60 : $userInterval;
 
         if ($forceRefresh || ($currentTime - $lastUpdate) > $checkInterval) {
-            $newTraffic = $this->safeGetTraffic($account);
+            $trafficResult = $this->safeGetTraffic($account);
             $status = $this->safeGetInstanceStatus($account);
 
             if ($status === 'Unknown') {
                 $status = $cachedStatus;
             }
 
-            if ($newTraffic < 0) {
+            $metadata = [
+                'traffic_api_status' => $trafficResult['status'] ?? 'ok',
+                'traffic_api_message' => $trafficResult['message'] ?? ''
+            ];
+            $trafficApiStatus = $metadata['traffic_api_status'];
+            $trafficApiMessage = $metadata['traffic_api_message'];
+
+            if (empty($trafficResult['success'])) {
                 $traffic = (float) ($account['traffic_used'] ?? 0);
                 $newUpdateTime = $lastUpdate;
             } else {
-                $traffic = $newTraffic;
+                $traffic = (float) ($trafficResult['value'] ?? 0);
                 $this->db->addHourlyStat($account['id'], $traffic);
                 $this->db->addDailyStat($account['id'], $traffic);
             }
@@ -1882,7 +1969,6 @@ class AliyunTrafficCheck
 
             $this->notifyStatusChangeIfNeeded($account, $cachedStatus, $status, '页面刷新检测到实例状态变化。');
 
-            $metadata = [];
             // 如果处于运行中且健康状态未知或非 OK，尝试获取详细状态以识别“操作系统启动中”
             if ($status === 'Running' && ($account['health_status'] ?? '') !== 'OK') {
                 $full = $this->safeGetInstanceFullStatus($account);
@@ -1913,8 +1999,10 @@ class AliyunTrafficCheck
             'accountMasked' => substr($account['access_key_id'], 0, 7) . '***',
             'accountLabel' => $accountDisplayLabel . ' / ' . $this->getRegionName($account['region_id']),
             'flow_total' => $maxTraffic,
-                'flow_used' => round($traffic, 6),
+            'flow_used' => round($traffic, 6),
             'percentageOfUse' => $usagePercent,
+            'trafficStatus' => $trafficApiStatus,
+            'trafficMessage' => $trafficApiMessage,
             'region' => $account['region_id'],
             'regionId' => $account['region_id'],
             'regionName' => $this->getRegionName($account['region_id']),

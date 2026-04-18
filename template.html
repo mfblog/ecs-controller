@@ -591,6 +591,73 @@
             color: #dc2626;
         }
 
+        .sync-note {
+            margin-top: 6px;
+            font-size: 12px;
+            line-height: 1.45;
+            color: #7c8698;
+        }
+
+        .sync-note.error {
+            color: #dc2626;
+        }
+
+        .sync-note.success {
+            color: #059669;
+        }
+
+        .test-result-card {
+            margin-top: 18px;
+            padding: 16px;
+            border-radius: 18px;
+            border: 1px solid rgba(226, 232, 240, 0.9);
+            background: rgba(248, 250, 252, 0.92);
+            display: grid;
+            gap: 10px;
+        }
+
+        .test-result-card.warning {
+            border-color: #fecaca;
+            background: #fff7f7;
+        }
+
+        .test-result-card.success {
+            border-color: #bbf7d0;
+            background: #f0fdf4;
+        }
+
+        .test-result-line {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 12px;
+            font-size: 13px;
+        }
+
+        .test-result-line strong {
+            color: #0f172a;
+        }
+
+        .test-result-badge {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 72px;
+            padding: 5px 10px;
+            border-radius: 999px;
+            font-size: 12px;
+            font-weight: 700;
+            background: #ecfdf5;
+            color: #059669;
+            border: 1px solid #d1fae5;
+        }
+
+        .test-result-badge.warning {
+            background: #fef2f2;
+            color: #dc2626;
+            border-color: #fecaca;
+        }
+
         .chip {
             display: inline-flex;
             align-items: center;
@@ -1873,13 +1940,19 @@
                                     <div class="flex items-end justify-between mb-3">
                                         <span class="text-[12px] text-[#7c8698]">流量消耗 ({{ item.percentageOfUse }}%)</span>
                                         <span class="text-[15px] font-bold text-slate-800">
-                                            {{ formatTrafficValue(item.flow_used) }} <span class="text-[#7c8698] font-normal text-[14px]">/ {{ item.flow_total }} GB</span>
+                                            <template v-if="hasTrafficIssue(item)">
+                                                <span class="text-[#dc2626] text-[14px]">{{ trafficIssueText(item) }}</span>
+                                            </template>
+                                            <template v-else>
+                                                {{ formatTrafficValue(item.flow_used) }} <span class="text-[#7c8698] font-normal text-[14px]">/ {{ item.flow_total }} GB</span>
+                                            </template>
                                         </span>
                                     </div>
                                     <div class="progress-track h-2">
                                         <div class="progress-fill h-full" :class="{ warning: item.rate95 }"
                                             :style="{ width: Math.min(item.percentageOfUse, 100) + '%' }"></div>
                                     </div>
+                                    <p v-if="hasTrafficIssue(item)" class="mt-2 text-xs text-[#dc2626]">{{ trafficIssueText(item) }}</p>
                                 </div>
 
                                 <div class="mt-6 flex items-center justify-between pt-4 text-xs text-[#7c8698]">
@@ -1989,12 +2062,14 @@
                                     <div class="summary-cell center-column">
                                         <div class="account-usage">
                                             <div class="account-usage__meta single">
-                                                <span>{{ formatTrafficValue(inst.flow_used) }} / {{ inst.flow_total }} GB</span>
+                                                <span v-if="hasTrafficIssue(inst)" class="text-[#dc2626]">{{ trafficIssueText(inst) }}</span>
+                                                <span v-else>{{ formatTrafficValue(inst.flow_used) }} / {{ inst.flow_total }} GB</span>
                                             </div>
                                             <div class="progress-track account-usage__bar">
                                                 <div class="progress-fill" :class="{ warning: inst.rate95 }"
                                                     :style="{ width: Math.min(inst.percentageOfUse, 100) + '%' }"></div>
                                             </div>
+                                            <div v-if="hasTrafficIssue(inst)" class="mt-1 text-xs text-[#dc2626]">{{ trafficIssueText(inst) }}</div>
                                         </div>
                                     </div>
                                     <div class="summary-cell center-column">
@@ -2089,12 +2164,14 @@
                                     <div class="summary-cell center-column">
                                         <div class="account-usage">
                                             <div class="account-usage__meta single">
-                                                <span>{{ formatTrafficValue(acc.usageUsed) }} / {{ acc.maxTraffic }} GB</span>
+                                                <span v-if="hasTrafficIssue(acc)" class="text-[#dc2626]">{{ trafficIssueText(acc) }}</span>
+                                                <span v-else>{{ formatTrafficValue(acc.usageUsed) }} / {{ acc.maxTraffic }} GB</span>
                                             </div>
                                             <div class="progress-track account-usage__bar">
                                                 <div class="progress-fill" :class="{ warning: (acc.usagePercent || 0) >= 95 }"
                                                     :style="{ width: Math.min(acc.usagePercent || 0, 100) + '%' }"></div>
                                             </div>
+                                            <div v-if="hasTrafficIssue(acc)" class="mt-1 text-xs text-[#dc2626]">{{ trafficIssueText(acc) }}</div>
                                         </div>
                                     </div>
                                     <div class="summary-cell center-column">
@@ -2115,6 +2192,7 @@
                                         </div>
                                     </div>
 	                                    <div class="summary-cell center-column">
+	                                        <div>
 	                                        <div class="row-actions">
 	                                            <button @click="syncAccount(idx)" class="ghost-button compact-button sync-button"
                                                     :class="getAccountSyncButtonClass(idx)"
@@ -2124,6 +2202,11 @@
 	                                            <button @click="openEditAccountModal(idx)" class="ghost-button compact-button">编辑</button>
 	                                            <button @click="removeAccountRow(idx)" class="danger-button compact-button">删除</button>
 	                                        </div>
+                                            <div v-if="getAccountSyncResult(idx)?.message" class="sync-note"
+                                                :class="{ error: !getAccountSyncResult(idx)?.success, success: getAccountSyncResult(idx)?.success }">
+                                                {{ getAccountSyncResult(idx)?.message }}
+                                            </div>
+                                            </div>
 	                                    </div>
 	                                </div>
 
@@ -2144,11 +2227,16 @@
                                 <div class="account-card-grid">
                                     <div>区域：{{ getRegionName(acc.regionId) }}</div>
                                     <div>站点：{{ getSiteTypeLabel(acc.siteType) }}</div>
-                                    <div>账号流量：{{ formatTrafficValue(acc.usageUsed) }} / {{ acc.maxTraffic }} GB</div>
+                                    <div>
+                                        账号流量：
+                                        <span v-if="hasTrafficIssue(acc)" class="text-[#dc2626]">{{ trafficIssueText(acc) }}</span>
+                                        <span v-else>{{ formatTrafficValue(acc.usageUsed) }} / {{ acc.maxTraffic }} GB</span>
+                                    </div>
                                     <div class="progress-track">
                                         <div class="progress-fill" :class="{ warning: (acc.usagePercent || 0) >= 95 }"
                                             :style="{ width: Math.min(acc.usagePercent || 0, 100) + '%' }"></div>
                                     </div>
+                                    <div v-if="hasTrafficIssue(acc)" class="text-xs text-[#dc2626]">{{ trafficIssueText(acc) }}</div>
                                     <div v-if="acc.billing && acc.billing.enabled && !acc.billing.error">消费情况：本月消费 {{ formatCurrencyValue(acc.billing.monthly_cost, acc.billing.currency) }} / 余额 {{ formatCurrencyValue(acc.billing.balance, acc.billing.currency) }}</div>
                                     <div v-else-if="acc.billing && acc.billing.error" class="account-billing__error">{{ acc.billing.error }}</div>
                                     <div v-else class="account-billing__hint">消费情况：未启用 费用中心</div>
@@ -2162,6 +2250,10 @@
 	                                    <button @click="openEditAccountModal(idx)" class="ghost-button !px-3 !py-2">编辑</button>
 	                                    <button @click="removeAccountRow(idx)" class="danger-button !px-3 !py-2">删除</button>
 	                                </div>
+                                    <div v-if="getAccountSyncResult(idx)?.message" class="sync-note"
+                                        :class="{ error: !getAccountSyncResult(idx)?.success, success: getAccountSyncResult(idx)?.success }">
+                                        {{ getAccountSyncResult(idx)?.message }}
+                                    </div>
                             </article>
 
                             <div v-if="config.Accounts.length === 0" class="metric-card">
@@ -2581,8 +2673,39 @@
                     </div>
                 </div>
 
+                <div v-if="accountDraftTestResult" class="test-result-card"
+                    :class="accountDraftTestResult.monitorStatus === 'warning' || !accountDraftTestResult.success ? 'warning' : 'success'">
+                    <div class="flex items-center justify-between gap-3">
+                        <div>
+                            <p class="text-sm font-bold text-[#0f172a]">账号测试结果</p>
+                            <p class="mt-1 text-xs text-[#64748b]">{{ accountDraftTestResult.message }}</p>
+                        </div>
+                        <span class="test-result-badge"
+                            :class="{ warning: accountDraftTestResult.monitorStatus === 'warning' || !accountDraftTestResult.success }">
+                            {{ accountDraftTestResult.monitorStatus === 'warning' || !accountDraftTestResult.success ? '需处理' : '通过' }}
+                        </span>
+                    </div>
+                    <div class="test-result-line">
+                        <strong>ECS 接口</strong>
+                        <span>已接通</span>
+                    </div>
+                    <div class="test-result-line">
+                        <strong>云监控接口</strong>
+                        <span :class="{ 'text-[#dc2626]': accountDraftTestResult.monitorStatus === 'warning' }">
+                            {{ accountDraftTestResult.monitorMessage || '未测试' }}
+                        </span>
+                    </div>
+                    <div class="test-result-line">
+                        <strong>当前区域实例数</strong>
+                        <span>{{ accountDraftTestResult.instanceCount ?? 0 }} 台</span>
+                    </div>
+                </div>
+
                 <div class="top-action-row" style="justify-content: flex-end; margin-top: 24px;">
                     <button @click="closeAccountModal" class="ghost-button">取消</button>
+                    <button @click="testAccountDraft" class="ghost-button" :disabled="testingAccountDraft || savingAccountModal">
+                        {{ testingAccountDraft ? '测试中...' : '测试账号' }}
+                    </button>
                     <button @click="saveAccountModal" class="solid-button" :disabled="savingAccountModal">
                         {{ savingAccountModal ? '保存中...' : '保存账号' }}
                     </button>
@@ -2987,7 +3110,9 @@
                     usageRemaining: 200,
                     usagePercent: 0,
                     instanceCount: 0,
-                    usageLastUpdated: ''
+                    usageLastUpdated: '',
+                    trafficStatus: 'ok',
+                    trafficMessage: ''
                 });
 
                 const createDefaultConfig = () => ({
@@ -3103,6 +3228,8 @@
                 });
                 const showAccountModal = ref(false);
                 const savingAccountModal = ref(false);
+                const testingAccountDraft = ref(false);
+                const accountDraftTestResult = ref(null);
                 const accountModalMode = ref('create');
                 const editingAccountIndex = ref(-1);
                 const accountDraft = ref(createDefaultAccount());
@@ -3145,6 +3272,20 @@
 
                     const mb = traffic * 1024;
                     return `${mb.toFixed(2).replace(/\.00$/, '')} MB`;
+                };
+                const hasTrafficIssue = (item) => {
+                    const status = item?.trafficStatus || 'ok';
+                    return status !== '' && status !== 'ok';
+                };
+                const trafficIssueText = (item) => {
+                    const status = item?.trafficStatus || 'ok';
+                    const message = (item?.trafficMessage || '').trim();
+                    if (message) return message;
+                    if (status === 'permission_denied') return '缺少云监控权限';
+                    if (status === 'auth_error') return '云监控鉴权失败';
+                    if (status === 'timeout') return '云监控请求超时';
+                    if (status === 'partial') return '部分实例流量同步失败';
+                    return '流量同步失败';
                 };
                 const formatCurrencyValue = (value, currency = 'CNY') => {
                     const amount = Number(value ?? 0);
@@ -3742,6 +3883,8 @@
                         const refreshed = statusInstances.value.find((item) => item.id === id);
                         if (data.billing_error) {
                             openAlert(`实例已刷新，账单查询异常：${data.billing_error}`, 'info');
+                        } else if (refreshed && hasTrafficIssue(refreshed)) {
+                            openAlert(`实例已刷新，${trafficIssueText(refreshed)}`, 'info');
                         } else if (refreshed) {
                             openAlert(`实例已刷新，当前流量 ${formatTrafficValue(refreshed.flow_used)}`, 'success');
                         } else {
@@ -3947,6 +4090,7 @@
                     accountModalMode.value = 'create';
                     editingAccountIndex.value = -1;
                     accountDraft.value = createDefaultAccount();
+                    accountDraftTestResult.value = null;
                     showAccountModal.value = true;
                 };
 
@@ -3957,12 +4101,15 @@
                         ...createDefaultAccount(),
                         ...(config.value.Accounts[index] || {})
                     };
+                    accountDraftTestResult.value = null;
                     showAccountModal.value = true;
                 };
 
                 const closeAccountModal = () => {
                     showAccountModal.value = false;
                     savingAccountModal.value = false;
+                    testingAccountDraft.value = false;
+                    accountDraftTestResult.value = null;
                     editingAccountIndex.value = -1;
                     accountDraft.value = createDefaultAccount();
                 };
@@ -4001,6 +4148,43 @@
 
                     config.value.Accounts = previousAccounts;
                     savingAccountModal.value = false;
+                };
+
+                const testAccountDraft = async () => {
+                    if (!validateAccountDraft()) return;
+                    testingAccountDraft.value = true;
+                    accountDraftTestResult.value = null;
+                    try {
+                        const res = await fetch('index.php?action=test_account', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ account: accountDraft.value })
+                        });
+                        const data = await res.json();
+                        if (!res.ok || !data.success) {
+                            accountDraftTestResult.value = {
+                                success: false,
+                                message: data.message || '账号测试失败',
+                                monitorStatus: 'warning',
+                                monitorMessage: data.message || '账号测试失败'
+                            };
+                            openAlert(data.message || '账号测试失败', 'error');
+                            return;
+                        }
+                        accountDraftTestResult.value = data;
+                        openAlert(data.monitorStatus === 'warning' ? '账号测试完成，云监控权限待补充' : '账号测试通过', data.monitorStatus === 'warning' ? 'info' : 'success');
+                    } catch (error) {
+                        console.error('Test account failed', error);
+                        accountDraftTestResult.value = {
+                            success: false,
+                            message: '账号测试请求失败，请稍后重试',
+                            monitorStatus: 'warning',
+                            monitorMessage: '账号测试请求失败，请稍后重试'
+                        };
+                        openAlert('账号测试请求失败，请稍后重试', 'error');
+                    } finally {
+                        testingAccountDraft.value = false;
+                    }
                 };
 
                 const openCreateEcsModal = () => {
@@ -4473,6 +4657,7 @@
                     currentMenu,
                     currentNotifyTab,
                     accountDraft,
+                    accountDraftTestResult,
                     accountModalMode,
                     accountSyncResults,
                     accountSyncStates,
@@ -4492,6 +4677,7 @@
                     passwordInput,
                     reloadPage,
                     savingAccountModal,
+                    testingAccountDraft,
                     ecsCreateConfirmed,
                     ecsCreateDraft,
                     ecsCreatePreview,
@@ -4525,6 +4711,9 @@
                     formatTrafficUsage,
                     diskUnitText,
                     diskCategoryText,
+                    hasTrafficIssue,
+                    trafficIssueText,
+                    getAccountSyncResult,
                     getAccountSyncLabel,
                     getAccountSyncButtonClass,
                     getSiteTypeLabel,
@@ -4543,6 +4732,7 @@
                     confirmCreateEcs,
                     canReplaceIp,
                     saveAccountModal,
+                    testAccountDraft,
                     statusClass,
                     statusText,
                     logTypeLabel,

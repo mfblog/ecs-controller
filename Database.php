@@ -208,6 +208,8 @@ class Database
         $this->ensureColumn('accounts', 'os_name', "TEXT DEFAULT ''");
         $this->ensureColumn('accounts', 'stopped_mode', "TEXT DEFAULT ''");
         $this->ensureColumn('accounts', 'health_status', "TEXT DEFAULT 'Unknown'");
+        $this->ensureColumn('accounts', 'traffic_api_status', "TEXT DEFAULT 'ok'");
+        $this->ensureColumn('accounts', 'traffic_api_message', "TEXT DEFAULT ''");
         $this->ensureColumn('ecs_create_tasks', 'public_ip_mode', "TEXT DEFAULT 'ecs_public_ip'");
         $this->ensureColumn('ecs_create_tasks', 'eip_allocation_id', "TEXT DEFAULT ''");
         $this->ensureColumn('ecs_create_tasks', 'eip_address', "TEXT DEFAULT ''");

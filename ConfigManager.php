@@ -177,7 +177,12 @@ class ConfigManager
                 'usageRemaining' => $maxTraffic,
                 'usagePercent' => 0.0,
                 'instanceCount' => 0,
-                'lastUpdated' => 0
+                'lastUpdated' => 0,
+                'trafficStatus' => 'ok',
+                'trafficMessage' => '',
+                '_trafficErrorCount' => 0,
+                '_trafficFirstStatus' => '',
+                '_trafficFirstMessage' => ''
             ];
         }
 
@@ -190,12 +195,25 @@ class ConfigManager
                     'usageRemaining' => $maxTraffic,
                     'usagePercent' => 0.0,
                     'instanceCount' => 0,
-                    'lastUpdated' => 0
+                    'lastUpdated' => 0,
+                    'trafficStatus' => 'ok',
+                    'trafficMessage' => '',
+                    '_trafficErrorCount' => 0,
+                    '_trafficFirstStatus' => '',
+                    '_trafficFirstMessage' => ''
                 ];
             }
 
             if (!empty($row['instance_id'])) {
                 $metrics[$groupKey]['instanceCount']++;
+                $trafficStatus = trim((string) ($row['traffic_api_status'] ?? 'ok'));
+                if ($trafficStatus !== '' && $trafficStatus !== 'ok') {
+                    $metrics[$groupKey]['_trafficErrorCount']++;
+                    if ($metrics[$groupKey]['_trafficFirstStatus'] === '') {
+                        $metrics[$groupKey]['_trafficFirstStatus'] = $trafficStatus;
+                        $metrics[$groupKey]['_trafficFirstMessage'] = trim((string) ($row['traffic_api_message'] ?? ''));
+                    }
+                }
             }
 
             $isCurrentMonthTraffic = ($row['traffic_billing_month'] ?? '') === date('Y-m');
@@ -209,6 +227,22 @@ class ConfigManager
             $used = (float) ($metrics[$groupKey]['usageUsed'] ?? 0);
             $metrics[$groupKey]['usageRemaining'] = max($maxTraffic - $used, 0);
             $metrics[$groupKey]['usagePercent'] = $maxTraffic > 0 ? min(round(($used / $maxTraffic) * 100, 2), 100) : 0;
+            $errorCount = (int) ($metrics[$groupKey]['_trafficErrorCount'] ?? 0);
+            $instanceCount = (int) ($metrics[$groupKey]['instanceCount'] ?? 0);
+            if ($instanceCount > 0 && $errorCount > 0) {
+                if ($errorCount >= $instanceCount) {
+                    $metrics[$groupKey]['trafficStatus'] = $metrics[$groupKey]['_trafficFirstStatus'] ?: 'error';
+                    $metrics[$groupKey]['trafficMessage'] = $metrics[$groupKey]['_trafficFirstMessage'] ?: '账号下实例流量同步失败';
+                } else {
+                    $metrics[$groupKey]['trafficStatus'] = 'partial';
+                    $metrics[$groupKey]['trafficMessage'] = '部分实例流量同步失败';
+                }
+            }
+            unset(
+                $metrics[$groupKey]['_trafficErrorCount'],
+                $metrics[$groupKey]['_trafficFirstStatus'],
+                $metrics[$groupKey]['_trafficFirstMessage']
+            );
         }
 
         return $metrics;
@@ -834,6 +868,14 @@ class ConfigManager
         if (isset($metadata['stopped_mode'])) {
             $sql .= ", stopped_mode = ?";
             $params[] = $metadata['stopped_mode'];
+        }
+        if (isset($metadata['traffic_api_status'])) {
+            $sql .= ", traffic_api_status = ?";
+            $params[] = $metadata['traffic_api_status'];
+        }
+        if (isset($metadata['traffic_api_message'])) {
+            $sql .= ", traffic_api_message = ?";
+            $params[] = $metadata['traffic_api_message'];
         }
 
         $sql .= " WHERE id = ?";
