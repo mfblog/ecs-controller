@@ -478,6 +478,9 @@ class AliyunTrafficCheck
             $logPrefix = "[{$accountLabel}]";
             $actions = [];
             $forceRefresh = false;
+            $protectionSuspended = !empty($account['protection_suspended']);
+            $protectionSuspendReason = trim((string) ($account['protection_suspend_reason'] ?? ''));
+            $protectionSuspendNotifiedAt = (int) ($account['protection_suspend_notified_at'] ?? 0);
 
             // 1. 自适应心跳
             $lastUpdate = $account['updated_at'] ?? 0;
@@ -506,6 +509,23 @@ class AliyunTrafficCheck
                     'traffic_api_status' => $trafficResult['status'] ?? 'ok',
                     'traffic_api_message' => $trafficResult['message'] ?? ''
                 ];
+                $authInvalid = $this->isCredentialInvalidTrafficStatus($trafficResult['status'] ?? '');
+
+                if ($authInvalid) {
+                    $metadata['protection_suspended'] = 1;
+                    $metadata['protection_suspend_reason'] = 'credential_invalid';
+                    $metadata['protection_suspend_notified_at'] = $protectionSuspendNotifiedAt;
+                    $protectionSuspended = true;
+                    $protectionSuspendReason = 'credential_invalid';
+                } elseif ($protectionSuspended && $protectionSuspendReason === 'credential_invalid') {
+                    $metadata['protection_suspended'] = 0;
+                    $metadata['protection_suspend_reason'] = '';
+                    $metadata['protection_suspend_notified_at'] = 0;
+                    $protectionSuspended = false;
+                    $protectionSuspendReason = '';
+                    $protectionSuspendNotifiedAt = 0;
+                    $this->db->addLog('info', "账号鉴权已恢复，自动停机保护已重新启用 [{$accountLabel}]");
+                }
 
                 if (empty($trafficResult['success'])) {
                     $traffic = $account['traffic_used'];
@@ -548,20 +568,37 @@ class AliyunTrafficCheck
                 $trafficDesc .= $isHardLimitExceeded ? "[已超出上限]" : "[接近上限]";
 
                 if ($thresholdAction === 'stop_and_notify') {
-                    $canAttemptStop = !in_array($status, ['Stopped', 'Stopping', 'Released'], true);
-
-                    // 达到账号流量上限后必须立即保护，不再等待下一次接口刷新窗口。
-                    if ($canAttemptStop) {
-                        if ($this->safeControlInstance($account, 'stop', $shutdownMode)) {
-                            $previousStatus = $status;
-                            $actions[] = $isHardLimitExceeded ? "已超量自动停机" : "接近上限自动停机";
-                            $this->db->addLog('warning', "账号出口流量达到保护线，已自动停机 [{$accountLabel}] 当前使用率:{$usagePercent}%");
-                            $this->configManager->updateAccountStatus($account['id'], $traffic, 'Stopping', $currentTime);
-                            $this->notifyStatusChangeIfNeeded($account, $previousStatus, 'Stopping', '流量达到保护线，已自动停机。');
-                            $status = 'Stopping';
+                    if ($protectionSuspended && $protectionSuspendReason === 'credential_invalid') {
+                        if ($protectionSuspendNotifiedAt <= 0) {
+                            $actions[] = "账号密钥失效，已暂停自动停机";
+                            $notifyResult = $this->notificationService->notifyCredentialInvalid($accountLabel, $accountTraffic, $usagePercent, $threshold);
+                            $this->logNotificationResult($notifyResult, $accountLabel);
+                            $this->db->addLog('warning', "检测到账号鉴权失效，已暂停自动停机保护 [{$accountLabel}] 当前使用率:{$usagePercent}%");
+                            $protectionSuspendNotifiedAt = $currentTime;
+                            $this->configManager->updateAccountStatus($account['id'], $traffic, $status, $lastUpdate, [
+                                'protection_suspended' => 1,
+                                'protection_suspend_reason' => 'credential_invalid',
+                                'protection_suspend_notified_at' => $protectionSuspendNotifiedAt
+                            ]);
                         } else {
-                            $actions[] = "自动停机失败";
-                            $this->db->addLog('error', "账号出口流量达到保护线，但自动停机失败 [{$accountLabel}] 当前使用率:{$usagePercent}%");
+                            $apiStatusLog .= " [鉴权失效,已暂停自动停机]";
+                        }
+                    } else {
+                        $canAttemptStop = !in_array($status, ['Stopped', 'Stopping', 'Released'], true);
+
+                        // 达到账号流量上限后必须立即保护，不再等待下一次接口刷新窗口。
+                        if ($canAttemptStop) {
+                            if ($this->safeControlInstance($account, 'stop', $shutdownMode)) {
+                                $previousStatus = $status;
+                                $actions[] = $isHardLimitExceeded ? "已超量自动停机" : "接近上限自动停机";
+                                $this->db->addLog('warning', "账号出口流量达到保护线，已自动停机 [{$accountLabel}] 当前使用率:{$usagePercent}%");
+                                $this->configManager->updateAccountStatus($account['id'], $traffic, 'Stopping', $currentTime);
+                                $this->notifyStatusChangeIfNeeded($account, $previousStatus, 'Stopping', '流量达到保护线，已自动停机。');
+                                $status = 'Stopping';
+                            } else {
+                                $actions[] = "自动停机失败";
+                                $this->db->addLog('error', "账号出口流量达到保护线，但自动停机失败 [{$accountLabel}] 当前使用率:{$usagePercent}%");
+                            }
                         }
                     }
                 } elseif ($shouldCheckApi) {
@@ -569,7 +606,7 @@ class AliyunTrafficCheck
                     $this->db->addLog('warning', "账号出口流量超限触发提醒 [{$accountLabel}] 当前使用率:{$usagePercent}%");
                 }
 
-                if (!empty($actions)) {
+                if (!empty($actions) && !($protectionSuspended && $protectionSuspendReason === 'credential_invalid')) {
                     $mailRes = $this->notificationService->sendTrafficWarning($accountLabel, $accountTraffic, $usagePercent, implode(',', $actions), $threshold);
                     $this->logNotificationResult($mailRes, $accountLabel);
                 }
@@ -683,6 +720,14 @@ class AliyunTrafficCheck
             'traffic_api_status' => $trafficResult['status'] ?? 'ok',
             'traffic_api_message' => $trafficResult['message'] ?? ''
         ];
+        if ($this->isCredentialInvalidTrafficStatus($trafficResult['status'] ?? '')) {
+            $metadata['protection_suspended'] = 1;
+            $metadata['protection_suspend_reason'] = 'credential_invalid';
+        } else {
+            $metadata['protection_suspended'] = 0;
+            $metadata['protection_suspend_reason'] = '';
+            $metadata['protection_suspend_notified_at'] = 0;
+        }
 
         if (empty($trafficResult['success'])) {
             $traffic = $targetAccount['traffic_used'];
@@ -1256,6 +1301,45 @@ class AliyunTrafficCheck
         return date('Y-m', (int) $timestamp) === date('Y-m', (int) $currentTime);
     }
 
+    private function isCredentialInvalidTrafficStatus($status)
+    {
+        return trim((string) $status) === 'auth_error';
+    }
+
+    private function isCredentialInvalidError($code, $message = '')
+    {
+        $normalizedCode = strtolower(trim((string) $code));
+        $normalizedMessage = strtolower(trim((string) $message));
+        if ($normalizedCode === '') {
+            return false;
+        }
+
+        $credentialErrorCodes = [
+            'invalidaccesskeyid.notfound',
+            'invalidaccesskeyid',
+            'signaturedoesnotmatch',
+            'incompletesignature',
+            'forbidden.accesskeydisabled',
+            'invalidsecuritytoken.expired',
+            'invalidsecuritytoken.malformed',
+            'missingsecuritytoken'
+        ];
+
+        if (in_array($normalizedCode, $credentialErrorCodes, true)) {
+            return true;
+        }
+
+        if ($normalizedMessage === '') {
+            return false;
+        }
+
+        return strpos($normalizedMessage, 'access key is not found') !== false
+            || strpos($normalizedMessage, 'access key id does not exist') !== false
+            || strpos($normalizedMessage, 'signature does not match') !== false
+            || strpos($normalizedMessage, 'incomplete signature') !== false
+            || strpos($normalizedMessage, 'accesskeydisabled') !== false;
+    }
+
     private function safeGetTraffic($account)
     {
         try {
@@ -1269,13 +1353,21 @@ class AliyunTrafficCheck
             $code = trim((string) $e->getErrorCode());
             $message = '缺少云监控权限';
             $status = 'permission_denied';
-            if ($code !== '' && !in_array($code, ['403', 'NoPermission'], true)) {
+            if ($this->isCredentialInvalidError($code, $e->getMessage())) {
+                $message = '账号 AK 已失效';
+                $status = 'auth_error';
+            } elseif ($code !== '' && !in_array($code, ['403', 'NoPermission'], true)) {
                 $message = '云监控鉴权失败';
                 $status = 'auth_error';
             }
             $this->db->addLog('error', "公网出口流量查询配置错误 [{$this->getAccountLogLabel($account)}]: " . ($code ?: "鉴权失败") . "，请确认AK拥有云监控流量查询权限");
             return ['success' => false, 'value' => null, 'status' => $status, 'message' => $message];
         } catch (ServerException $e) {
+            $code = trim((string) $e->getErrorCode());
+            if ($this->isCredentialInvalidError($code, $e->getErrorMessage())) {
+                $this->db->addLog('error', "公网出口流量查询失败 [{$this->getAccountLogLabel($account)}]: {$code} - " . $e->getErrorMessage());
+                return ['success' => false, 'value' => null, 'status' => 'auth_error', 'message' => '账号 AK 已失效'];
+            }
             $this->db->addLog('error', "公网出口流量查询失败 [{$this->getAccountLogLabel($account)}]: " . $e->getErrorCode() . " - " . $e->getErrorMessage());
             return ['success' => false, 'value' => null, 'status' => 'sync_error', 'message' => '云监控接口异常'];
         } catch (\Exception $e) {
@@ -1951,6 +2043,14 @@ class AliyunTrafficCheck
                 'traffic_api_status' => $trafficResult['status'] ?? 'ok',
                 'traffic_api_message' => $trafficResult['message'] ?? ''
             ];
+            if ($this->isCredentialInvalidTrafficStatus($trafficResult['status'] ?? '')) {
+                $metadata['protection_suspended'] = 1;
+                $metadata['protection_suspend_reason'] = 'credential_invalid';
+            } else {
+                $metadata['protection_suspended'] = 0;
+                $metadata['protection_suspend_reason'] = '';
+                $metadata['protection_suspend_notified_at'] = 0;
+            }
             $trafficApiStatus = $metadata['traffic_api_status'];
             $trafficApiMessage = $metadata['traffic_api_message'];
 

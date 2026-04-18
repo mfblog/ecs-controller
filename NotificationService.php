@@ -71,6 +71,32 @@ class NotificationService
         return $this->dispatchNotifications($title, "检测到流量异常或达到阈值", $details, 'warning', $textMsg, $accessKeyId);
     }
 
+    public function notifyCredentialInvalid($accessKeyId, $traffic, $percentage, $threshold)
+    {
+        $title = "流量告警 - 账号密钥已失效";
+        $trafficText = $this->formatTraffic((float) $traffic);
+        $maskedAccount = substr($accessKeyId, 0, 7) . '***';
+        $statusText = '检测到 AK 已失效，已暂停自动停机';
+        $details = [
+            ['label' => '账号', 'value' => $maskedAccount],
+            ['label' => '当前流量', 'value' => $trafficText],
+            ['label' => '使用率', 'value' => $percentage . '%', 'highlight' => true],
+            ['label' => '设定阈值', 'value' => $threshold . '%'],
+            ['label' => '当前状态', 'value' => $statusText],
+            ['label' => '处理建议', 'value' => '请更新 AK 后再恢复自动停机保护。']
+        ];
+
+        $textMsg = "【ECS 服务器管家】{$title}\n" .
+            "账号: {$maskedAccount}\n" .
+            "当前流量: {$trafficText}\n" .
+            "使用率: {$percentage}%\n" .
+            "设定阈值: {$threshold}%\n" .
+            "当前状态: {$statusText}\n" .
+            "处理建议: 请更新 AK 后再恢复自动停机保护。";
+
+        return $this->dispatchNotifications($title, "检测到账号密钥失效，已暂停自动停机保护，避免重复失败通知。", $details, 'warning', $textMsg, $accessKeyId);
+    }
+
     public function notifyEcsCreated($accountLabel, array $result, array $preview = [])
     {
         $title = 'ECS 创建并启动成功';

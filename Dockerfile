@@ -70,6 +70,7 @@ WORKDIR /var/www/html
 
 # 复制 Nginx 配置 (利用缓存，变更频率低)
 COPY docker/nginx.conf /etc/nginx/http.d/default.conf
+COPY docker/php-fpm-www.conf /usr/local/etc/php-fpm.d/zz-www-local.conf
 
 # 复制并配置启动脚本
 COPY docker/entrypoint.sh /entrypoint.sh

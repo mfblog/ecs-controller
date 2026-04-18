@@ -877,6 +877,18 @@ class ConfigManager
             $sql .= ", traffic_api_message = ?";
             $params[] = $metadata['traffic_api_message'];
         }
+        if (isset($metadata['protection_suspended'])) {
+            $sql .= ", protection_suspended = ?";
+            $params[] = $metadata['protection_suspended'] ? 1 : 0;
+        }
+        if (isset($metadata['protection_suspend_reason'])) {
+            $sql .= ", protection_suspend_reason = ?";
+            $params[] = (string) $metadata['protection_suspend_reason'];
+        }
+        if (isset($metadata['protection_suspend_notified_at'])) {
+            $sql .= ", protection_suspend_notified_at = ?";
+            $params[] = (int) $metadata['protection_suspend_notified_at'];
+        }
 
         $sql .= " WHERE id = ?";
         $params[] = $id;
