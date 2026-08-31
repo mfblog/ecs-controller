@@ -27,7 +27,7 @@ jobs:
         username: ${{ secrets.DOCKER_USERNAME }}
         password: ${{ secrets.DOCKER_PASSWORD }}
 
-    - name: Build and Push Docker image
+    - name: Build and Push controller image
       uses: docker/build-push-action@v5
       with:
         context: ./
@@ -35,3 +35,19 @@ jobs:
         push: true
         tags: |
           ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:latest
+          ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+        build-args: |
+          ECS_VERSION=sha-${{ github.sha }}
+          ECS_COMMIT=${{ github.sha }}
+          ECS_BUILD_DATE=${{ github.event.head_commit.timestamp }}
+
+    - name: Build and Push updater image
+      uses: docker/build-push-action@v5
+      with:
+        context: ./
+        file: ./docker/updater.Dockerfile
+        platforms: linux/amd64,linux/arm64
+        push: true
+        tags: |
+          ${{ secrets.DOCKER_USERNAME }}/ecs-controller-updater:latest
+          ${{ secrets.DOCKER_USERNAME }}/ecs-controller-updater:updater-sha-${{ github.sha }}

@@ -1,86 +1,37 @@
-# 第一阶段：构建依赖 (Builder Stage)
-# 使用官方 Composer 镜像安装 PHP 依赖，避免将 Composer 及其缓存带入最终镜像
-FROM composer:2 AS builder
+FROM golang:1.26-alpine AS builder
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+ARG ECS_VERSION=dev
+ARG ECS_COMMIT=dev
+ARG ECS_BUILD_DATE=unknown
+# Build for the architecture selected by the container base image. This keeps
+# native ARM64 builds native on Colima while still working for amd64 builders.
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X github.com/Kori1c/ecs-controller/internal/app.Version=${ECS_VERSION} -X github.com/Kori1c/ecs-controller/internal/app.Commit=${ECS_COMMIT} -X github.com/Kori1c/ecs-controller/internal/app.BuildDate=${ECS_BUILD_DATE}" -o /out/ecs-controller ./cmd/ecs-controller
+
+FROM alpine:3.22
+
+RUN apk add --no-cache ca-certificates tzdata wget su-exec \
+    && addgroup -S -g 10001 ecs-controller \
+    && adduser -S -D -H -u 10001 -G ecs-controller ecs-controller \
+    && mkdir -p /var/lib/ecs-controller /app/static \
+    && chown -R ecs-controller:ecs-controller /var/lib/ecs-controller /app
 
 WORKDIR /app
+COPY --from=builder /out/ecs-controller /app/ecs-controller
+COPY --chown=ecs-controller:ecs-controller template.html /app/template.html
+COPY --chown=ecs-controller:ecs-controller static /app/static
 
-# 复制依赖定义文件
-COPY composer.json composer.lock ./
+ENV TZ=Asia/Shanghai \
+    ECS_APP_DIR=/app \
+    ECS_DATA_DIR=/var/lib/ecs-controller \
+    ECS_HTTP_ADDR=:8080
 
-# 安装依赖 (排除开发依赖，优化自动加载)
-# 注意：SDK Sign::uuid() 的 microtime() 返回带空格的字符串导致签名失败，需修复
-RUN composer install --no-dev --optimize-autoloader --ignore-platform-reqs --no-interaction --no-scripts \
-    && sed -i 's/return md5(\$salt . uniqid(md5(microtime(true)), true)) . microtime();/return md5(\$salt . uniqid(md5(microtime(true)), true)) . str_replace(" ", "", microtime());/' /app/vendor/alibabacloud/client/src/Support/Sign.php
+COPY --chown=root:root docker/entrypoint-go.sh /entrypoint-go.sh
+RUN chmod 0755 /entrypoint-go.sh
 
-# 复制其余项目文件
-COPY . .
-
-# -----------------------------------------------------------------------------
-
-# 第二阶段：运行环境 (Final Stage)
-# 基于 Alpine 的 PHP-FPM 镜像，体积非常小
-FROM php:8.2-fpm-alpine
-
-# 设置镜像元数据
-LABEL maintainer="ECS-Controller-Docker"
-
-# 设置环境变量
-ENV TZ=Asia/Shanghai
-
-# 安装系统依赖、编译 PHP 扩展、清理依赖、配置时区
-# 将所有 RUN 指令合并以减少镜像层数
-RUN apk add --no-cache \
-    nginx \
-    dcron \
-    sqlite-libs \
-    libcurl \
-    libxml2 \
-    tzdata \
-    && apk add --no-cache --virtual .build-deps \
-    $PHPIZE_DEPS \
-    curl-dev \
-    libxml2-dev \
-    sqlite-dev \
-    oniguruma-dev \
-    && docker-php-ext-install \
-    curl \
-    pdo_sqlite \
-    bcmath \
-    simplexml \
-    xml \
-    mbstring \
-    opcache \
-    # 配置系统时区
-    && cp /usr/share/zoneinfo/$TZ /etc/localtime \
-    && echo $TZ > /etc/timezone \
-    # 配置 PHP
-    && mv "$PHP_INI_DIR/php.ini-production" "$PHP_INI_DIR/php.ini" \
-    && sed -i "s/;date.timezone =/date.timezone = Asia\/Shanghai/g" "$PHP_INI_DIR/php.ini" \
-    # 清理构建依赖和缓存
-    && apk del .build-deps \
-    && rm -rf /var/cache/apk/* \
-    # 预创建目录并修正权限
-    && mkdir -p /var/www/html/data \
-    && chown -R www-data:www-data /var/www/html \
-    # 配置 Cron (每分钟执行)
-    && echo "* * * * * /usr/local/bin/php /var/www/html/monitor.php >> /dev/null 2>&1" >> /etc/crontabs/www-data
-
-# 配置工作目录
-WORKDIR /var/www/html
-
-# 复制 Nginx 配置 (利用缓存，变更频率低)
-COPY docker/nginx.conf /etc/nginx/http.d/default.conf
-COPY docker/php-fpm-www.conf /usr/local/etc/php-fpm.d/zz-www-local.conf
-
-# 复制并配置启动脚本
-COPY docker/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
-
-# 最后复制项目代码 (变更频率高，放在最后)
-COPY --from=builder --chown=www-data:www-data /app /var/www/html
-
-# 暴露端口
-EXPOSE 80
-
-# 设置容器启动入口
-ENTRYPOINT ["/entrypoint.sh"]
+EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s CMD wget -q -O - http://127.0.0.1:8080/healthz || exit 1
+ENTRYPOINT ["/entrypoint-go.sh"]

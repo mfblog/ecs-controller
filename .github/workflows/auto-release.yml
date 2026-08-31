@@ -22,27 +22,62 @@ jobs:
         run: |
           LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
           if [ -z "$LATEST_TAG" ]; then
-            NEXT_TAG="v1.6.0"
+            NEXT_TAG="v1.17.1"
           else
             # Extract major.minor.patch
             if [[ "$LATEST_TAG" =~ ^v?([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
               MAJOR="${BASH_REMATCH[1]}"
               MINOR="${BASH_REMATCH[2]}"
               PATCH="${BASH_REMATCH[3]}"
-              NEXT_TAG="v${MAJOR}.${MINOR}.$((PATCH + 1))"
+              # Move the release line to v1.17.1 once, then keep patch bumps
+              # on the v1.17 line for subsequent pushes.
+              if (( MAJOR < 1 || (MAJOR == 1 && MINOR < 17) )); then
+                NEXT_TAG="v1.17.1"
+              else
+                NEXT_TAG="v${MAJOR}.${MINOR}.$((PATCH + 1))"
+              fi
             else
               # Fallback if the previous tag format isn't standard
-              NEXT_TAG="v1.6.0"
+              NEXT_TAG="v1.17.1"
             fi
           fi
           echo "tag=$NEXT_TAG" >> $GITHUB_OUTPUT
+          echo "previous_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+
+      - name: Generate release notes
+        id: release_notes
+        env:
+          PREVIOUS_TAG: ${{ steps.generate_tag.outputs.previous_tag }}
+        run: |
+          if [ -n "$PREVIOUS_TAG" ]; then
+            COMMIT_RANGE="$PREVIOUS_TAG..HEAD"
+            COMPARE_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/compare/$PREVIOUS_TAG...${{ steps.generate_tag.outputs.tag }}"
+          else
+            COMMIT_RANGE="HEAD"
+            COMPARE_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/commits/${{ steps.generate_tag.outputs.tag }}"
+          fi
+
+          delimiter="RELEASE_NOTES_$(date +%s%N)"
+          {
+            echo "notes<<$delimiter"
+            # Release entries use the commit title and body, so keep both user-facing.
+            git log "$COMMIT_RANGE" --format="- **%s** ([%h]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/commit/%H))%n%b%n"
+            echo "$delimiter"
+            echo "compare_url=$COMPARE_URL"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Create or Update Release
         uses: ncipollo/release-action@v1
         with:
           tag: ${{ steps.generate_tag.outputs.tag }}
           name: "Release ${{ steps.generate_tag.outputs.tag }}"
-          body: "Auto-generated release for the latest commit."
+          body: |
+            ## 更新内容
+
+            ${{ steps.release_notes.outputs.notes }}
+
+            ---
+            [查看完整改动](${{ steps.release_notes.outputs.compare_url }})
           allowUpdates: false
           makeLatest: true
           token: ${{ secrets.GITHUB_TOKEN }}
